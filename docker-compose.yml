@@ -1,0 +1,58 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: loguser
+      POSTGRES_PASSWORD: logpass
+      POSTGRES_DB: logs
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Tuned for a 1 CPU / 1GB container: shared_buffers ~25% of RAM,
+    # a modest work_mem so a handful of concurrent aggregate queries
+    # can't each balloon and starve the box, and max_wal_size raised
+    # so bulk-insert-driven checkpoints don't fire too frequently.
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c work_mem=8MB
+      -c maintenance_work_mem=64MB
+      -c max_wal_size=1GB
+      -c max_connections=40
+      -c effective_cache_size=768MB
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loguser -d logs"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://loguser:logpass@postgres:5432/logs
+      PG_POOL_MAX: 8
+      RETENTION_DAYS: 30
+      RETENTION_INTERVAL_MS: 3600000
+      # Optional features — off by default, per the load-generator contract.
+      AUTH_ENABLED: "false"
+      AUTH_MASTER_KEY: ""
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+volumes:
+  pgdata:

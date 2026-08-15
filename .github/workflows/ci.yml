@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Type-check and build
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+  smoke-test-unauthenticated:
+    needs: build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: loguser
+          POSTGRES_PASSWORD: logpass
+          POSTGRES_DB: logs
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U loguser -d logs"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm install
+      - run: npm run build
+
+      - name: Start service (no auth — default posture)
+        env:
+          DATABASE_URL: postgres://loguser:logpass@localhost:5432/logs
+          PORT: 8080
+          AUTH_ENABLED: "false"
+        run: |
+          node dist/server.js &
+          echo $! > server.pid
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/health && break
+            sleep 1
+          done
+
+      - name: Run contract smoke test (unauthenticated)
+        env:
+          BASE_URL: http://localhost:8080
+        run: npm run test:smoke
+
+      - name: Stop service
+        if: always()
+        run: kill $(cat server.pid) || true
+
+  smoke-test-authenticated:
+    needs: build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: loguser
+          POSTGRES_PASSWORD: logpass
+          POSTGRES_DB: logs
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U loguser -d logs"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm install
+      - run: npm run build
+
+      - name: Start service (AUTH_ENABLED=true)
+        env:
+          DATABASE_URL: postgres://loguser:logpass@localhost:5432/logs
+          PORT: 8080
+          AUTH_ENABLED: "true"
+          AUTH_MASTER_KEY: ci-test-master-key
+        run: |
+          node dist/server.js &
+          echo $! > server.pid
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/health && break
+            sleep 1
+          done
+
+      - name: Run contract smoke test (authenticated + rejection check)
+        env:
+          BASE_URL: http://localhost:8080
+          AUTH_TOKEN: ci-test-master-key
+        run: npm run test:smoke
+
+      - name: Stop service
+        if: always()
+        run: kill $(cat server.pid) || true
